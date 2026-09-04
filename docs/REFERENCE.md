@@ -9,7 +9,7 @@
 | Pwr | watts. GPUs: gauge filled to power ÷ power limit. CPU: text only — no limit is published |
 | Load | gauge 0–100 %. CPU: aggregate utilisation from `/proc/stat` deltas. GPU: `utilization.gpu`. Drives: share of capacity in use (mounted filesystems on that disk, or its ZFS pool) |
 | VRAM | GPUs only: `used/totalGB`, gauge filled to used ÷ total |
-| avg / max | since start or last `r` |
+| avg / max | since start or last `r`; extras shown only when the terminal is wider than the full table needs — never in the opening window |
 | Status | `Cool` < 50 °C · `OK` 50–69 · `Warm` 70–89 · `HOT!` ≥ 90 (`COOL_MAX`, `OK_MAX`, `WARM_MAX`) |
 
 Gauges share one width: the widest text the visible gauge columns can EVER produce — the
@@ -27,7 +27,9 @@ inside a group.
 
 Everything is re-laid out every frame for the current terminal size. As the terminal narrows the
 gauges give up their side margins first — every gauge stays a bar, never narrower than its
-reserved text — then columns go: avg/max → VRAM → label shrinks to 8. Below the minimum
+reserved text — then the label shrinks to 8. VRAM is present exactly when the machine has a GPU
+and is never dropped. avg/max appear only above the full table's width (label, gauges with
+margins, plus both stat columns). Below the minimum
 (`temp_monitor.py --geometry` reports what this machine needs; the floor is `min_cols` × 8 rows,
 constant for given hardware) a "too small" notice is shown.
 Rows that do not fit are summarised as "… N more row(s)".
@@ -55,7 +57,8 @@ is not used: VTE ignores the requested size.
 
 ## Exit summary
 
-`q`/`Esc`/`Ctrl+C` prints a table of current / power / VRAM / average / maximum / status per row,
+`q`/`Esc`/`Ctrl+C` prints a table of current / power / VRAM / average / maximum (since start or
+last `r`) / status per row,
 duration and sample count, plus a warning line for anything that reached ≥ 90 °C. Optional
 columns are shed on narrow terminals so lines never wrap.
 

@@ -651,11 +651,11 @@ def has_vram(state):
     return any(cat(k) == "gpu" for k in state.order)
 
 
-def _layout(lw, vram, avg, mx, gw):
+def _layout(lw, vram, gw, stats=False):
     x, off = PAD, {}
     for name, w in (("label", lw), ("temp", TEMP_W), ("pwr", gw),
                     ("load", gw), ("vram", gw if vram else 0),
-                    ("avg", AVG_W if avg else 0), ("max", MAX_W if mx else 0),
+                    ("avg", AVG_W if stats else 0), ("max", MAX_W if stats else 0),
                     ("status", STATUS_W)):
         if w:
             off[name] = x
@@ -664,37 +664,40 @@ def _layout(lw, vram, avg, mx, gw):
 
 
 def min_cols(state=None):
-    """Narrowest terminal that fits the narrowest layout: shortest label, no
-    VRAM/avg/max, every gauge at the width its formatters reserve.  Constant,
-    so the "too small" threshold cannot move while values move; `state` is
-    accepted for symmetry with compute_layout."""
-    return _layout(MIN_LABEL_W, False, False, False,
-                   gauge_text_w(False)).right + PAD
+    """Narrowest terminal that fits the narrowest layout: shortest label, every
+    column this machine offers (VRAM whenever it has a GPU), every gauge at the
+    width its formatters reserve.  Constant for given hardware, so the "too
+    small" threshold cannot move while values move."""
+    vram = has_vram(state) if state is not None else False
+    return _layout(MIN_LABEL_W, vram, gauge_text_w(vram)).right + PAD
 
 
 def compute_layout(iw, state):
     """Column geometry for inner width iw.  Order: label, temp, pwr, load,
-    [vram], [avg], [max], status.  Every gauge is a bar and all of them share
-    one width, which is the background of the value it shows: gauges never
-    narrow past the width their formatters reserve, and any spare width goes to
-    their side margins (up to GAUGE_PAD) before it is left unused.  When even
-    bare-text gauges do not fit, avg/max are dropped, then VRAM, and last the
+    [vram], [avg, max], status.  VRAM is present exactly when the machine has
+    a GPU and is never dropped.  avg/max are extras: they appear only once the
+    terminal is wide enough for the full label AND every gauge at its full
+    margin AND the two stat columns, and never at the opening width (the
+    legend row's, which the window is sized to) - widening the terminal adds
+    them on every machine, GPU or not.  Every
+    gauge is a bar and all of them share one width, which is the background of
+    the value it shows: gauges never narrow past the width their formatters
+    reserve, and any spare width goes to their side margins (up to GAUGE_PAD)
+    before it is left unused.  When even bare-text gauges do not fit, the
     label shrinks towards MIN_LABEL_W."""
-    def spare(lw, vram, avg, mx, gw):
-        return iw - PAD - _layout(lw, vram, avg, mx, gw).right
+    def spare(lw, vram, gw, stats=False):
+        return iw - PAD - _layout(lw, vram, gw, stats).right
 
-    vrams = (True, False) if has_vram(state) else (False,)
-    for vram in vrams:
-        tw = gauge_text_w(vram)
-        for avg in (True, False):
-            room = spare(LABEL_W, vram, avg, avg, tw)
-            if room >= 0:
-                gauges = 3 if vram else 2
-                return _layout(LABEL_W, vram, avg, avg,
-                               tw + min(GAUGE_PAD, room // gauges))
-    tw = gauge_text_w(False)
-    lw = MIN_LABEL_W + spare(MIN_LABEL_W, False, False, False, tw)
-    return _layout(min(LABEL_W, max(MIN_LABEL_W, lw)), False, False, False, tw)
+    vram = has_vram(state)
+    tw = gauge_text_w(vram)
+    if iw > legend_cols() and spare(LABEL_W, vram, tw + GAUGE_PAD, True) >= 0:
+        return _layout(LABEL_W, vram, tw + GAUGE_PAD, True)   # wider than opening
+    room = spare(LABEL_W, vram, tw)
+    if room >= 0:
+        gauges = 3 if vram else 2
+        return _layout(LABEL_W, vram, tw + min(GAUGE_PAD, room // gauges))
+    lw = MIN_LABEL_W + spare(MIN_LABEL_W, vram, tw)
+    return _layout(min(LABEL_W, max(MIN_LABEL_W, lw)), vram, tw)
 
 
 TITLE = "SYSTEM TEMPERATURE MONITOR"

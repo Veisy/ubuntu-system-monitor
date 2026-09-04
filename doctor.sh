@@ -20,7 +20,7 @@ if [[ -t 1 ]]; then
     (( cols >= BASH_REMATCH[1] && rows >= BASH_REMATCH[2] )) \
       && ok "terminal ${cols}x${rows} (this machine needs $want)" \
       || miss "terminal ${cols}x${rows}: this machine needs $want for every row plus the legend; \
-below that rows and columns drop out - 'temp_monitor.sh --window' opens a fitted one"
+below that rows drop out - 'temp_monitor.sh --window' opens a fitted one"
   fi
 fi
 
