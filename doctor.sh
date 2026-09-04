@@ -3,6 +3,7 @@
 # Read-only; exit 0 when the monitor can run, 1 when a hard requirement is missing.
 # Usage: bash doctor.sh
 set -uo pipefail
+SRC=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
 ok()   { printf '  [x] %s\n' "$1"; }
 miss() { printf '  [ ] %s\n' "$1"; }
 fail=0
@@ -14,8 +15,13 @@ else miss "python3 >= 3.8 with the curses module (apt install python3)"; fail=1;
 case "${LANG:-}${LC_ALL:-}" in *[Uu][Tt][Ff]-8*|*[Uu][Tt][Ff]8*) ok "UTF-8 locale";; *) miss "UTF-8 locale (block glyphs need it; set LANG=C.UTF-8)";; esac
 if [[ -t 1 ]]; then
   read -r rows cols < <(stty size 2>/dev/null || echo 0 0)
-  (( cols >= 113 && rows >= 23 )) && ok "terminal ${cols}x${rows} (full table needs 113x23)" \
-                                   || miss "terminal ${cols}x${rows}: full table needs 113x23, minimum 48x8 (columns drop out below)"
+  want=$(python3 "$SRC/temp_monitor.py" --geometry 2>/dev/null)   # what THIS machine needs
+  if [[ $want =~ ^([0-9]+)x([0-9]+)$ ]]; then
+    (( cols >= BASH_REMATCH[1] && rows >= BASH_REMATCH[2] )) \
+      && ok "terminal ${cols}x${rows} (this machine needs $want)" \
+      || miss "terminal ${cols}x${rows}: this machine needs $want for every row plus the legend; \
+below that rows and columns drop out - 'temp_monitor.sh --window' opens a fitted one"
+  fi
 fi
 
 echo "data sources:"

@@ -14,7 +14,7 @@ bash doctor.sh
 runtime:
   [x] python3 3.12 with curses
   [x] UTF-8 locale
-  [x] terminal 113x23 (full table needs 113x23)
+  [x] terminal WxH (this machine needs WxH)
 data sources:
   [x] CPU temperature (hwmon: k10temp nvme drivetemp ...)
   [ ] CPU power - RAPL counters are root-only: sudo bash root_setup.sh
@@ -52,16 +52,18 @@ bash install.sh                     # ~/.local/bin, GNOME: Ctrl+Shift+Alt+T
 DEST=/opt/monitor SHORTCUT='<Super>m' bash install.sh   # custom target / key
 ```
 
-The shortcut opens `gnome-terminal --geometry=113x23` — exactly the size of the full table with
-avg/max columns; smaller terminals drop columns in this order: avg/max, load gauge, VRAM, then
-label width. Minimum 48×8.
+The shortcut runs `temp_monitor.sh --window 1`, which sizes the window when it opens: it asks
+`temp_monitor.py --geometry` what this machine needs, caps that by what the screen can show, and
+launches the terminal it finds (`$TERMINAL`, then the desktop's own, then `x-terminal-emulator`,
+then gnome-terminal, konsole, xfce4-terminal, mate-terminal, kitty, alacritty, xterm) with that
+emulator's character geometry.
+No size is stored anywhere — add a GPU or a disk and the next window is taller. Sizing rules:
+`docs/REFERENCE.md`.
 
-Other desktops (bind manually):
+Other desktops: bind the same command, whatever the emulator.
 
 ```
-xfce4-terminal --geometry=113x23 -e "bash -c '$HOME/.local/bin/temp_monitor.sh 1; exec bash'"
-konsole --geometry 113x23 -e bash -c "$HOME/.local/bin/temp_monitor.sh 1; exec bash"
-kitty --override initial_window_width=113c --override initial_window_height=23c $HOME/.local/bin/temp_monitor.sh 1
+$HOME/.local/bin/temp_monitor.sh --window 1
 ```
 
 Headless / SSH: just run `temp_monitor.sh`; it needs a TTY, so use `ssh -t`.
@@ -76,7 +78,7 @@ Noto Mono, any Nerd Font. 256 colours give a grey gauge track; 8-colour terminal
 | Symptom | Cause / fix |
 |---|---|
 | `requires an interactive terminal (TTY)` | launched without a terminal; use a terminal emulator or `ssh -t` |
-| `Terminal too small: WxH` | enlarge; the message states the minimum for the current values |
+| `Terminal too small: WxH` | enlarge, or open a fitted window with `temp_monitor.sh --window`; the message states this machine's minimum |
 | bars render as `?` or boxes | font lacks block glyphs (see §4) |
 | CPU `Pwr` is `--` | `doctor.sh` line "CPU power" tells you whether RAPL needs `root_setup.sh` or the platform has no sensor |
 | no GPU rows | `nvidia-smi -L` must work for the current user |

@@ -12,8 +12,11 @@
 | avg / max | since start or last `r` |
 | Status | `Cool` < 50 °C · `OK` 50–69 · `Warm` 70–89 · `HOT!` ≥ 90 (`COOL_MAX`, `OK_MAX`, `WARM_MAX`) |
 
-Gauges share one width: 8 columns, or the longest value on any gauge plus a one-column margin
-each side. Fill has eighth-block resolution; any non-zero value shows a sliver and only a true
+Gauges share one width: the widest text the visible gauge columns can EVER produce — the
+formatters' own ceilings (`PWR_W` 6, `LOAD_W` 4 for `%100`, `VRAM_W` 9), never the current
+reading — plus up to one column of margin each side when the terminal has room (`GAUGE_PAD`).
+Reserving capacity is what keeps the table still: `99.9W` growing to `100.1W` cannot re-widen
+every column. Fill has eighth-block resolution; any non-zero value shows a sliver and only a true
 100 % reaches the end. Text over the filled part is drawn inverted. A row with no reading shows
 `--`; a value with no full scale (CPU power) is text without a bar.
 
@@ -22,10 +25,33 @@ inside a group.
 
 ## Layout
 
-Everything is re-laid out every frame for the current terminal size. Column drop order as the
-terminal narrows: avg/max → Load gauge (percentage stays as text) → VRAM → label shrinks to 8.
-Below the minimum (48 columns × 8 rows, wider when values are long) a "too small" notice is shown.
+Everything is re-laid out every frame for the current terminal size. As the terminal narrows the
+gauges give up their side margins first — every gauge stays a bar, never narrower than its
+reserved text — then columns go: avg/max → VRAM → label shrinks to 8. Below the minimum
+(`temp_monitor.py --geometry` reports what this machine needs; the floor is `min_cols` × 8 rows,
+constant for given hardware) a "too small" notice is shown.
 Rows that do not fit are summarised as "… N more row(s)".
+
+## Opening geometry
+
+`temp_monitor.py --geometry [interval]` prints `COLSxROWS` for one sensor round — no curses, no
+TTY needed. GPUs the round missed are still counted from `/sys/bus/pci/devices` (NVIDIA display
+class), so a driver that is briefly unavailable cannot cost the window a row per GPU. Columns are the widest line that *cannot* shrink (the legend row, the header's meta
+line, or `min_cols`), so the table adapts inside the window instead of the window growing to the
+table's full width: that is 95 on every machine (the legend row's own width), and avg/max
+start hidden. Rows cover the
+header, every sensor row, the rules between hardware groups, the closing rule, the legend, and
+the bottom line curses keeps free.
+
+`temp_monitor.sh --window [interval]` opens it. The ideal size is capped by a deliberately
+conservative screen ceiling — pixels of one monitor (`xrandr` primary, else its active mode;
+never `xdpyinfo`'s multi-head union), cell size from the desktop
+monospace font's point size, the desktop text-scaling factor and DPI (0.60 em wide, 1.25 em
+tall, rounded up, 95 % of the screen)
+— so the window is never larger than the display. `TEMP_MONITOR_FONT_PT` overrides the font
+probe. With no screen probe (no X tools, an unknown font source) the window opens maximized
+instead, and the renderer adapts; the unclamped ideal is never sent. XTWINOPS `CSI 8 t` resizing
+is not used: VTE ignores the requested size.
 
 ## Exit summary
 

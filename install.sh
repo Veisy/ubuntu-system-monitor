@@ -1,14 +1,13 @@
 #!/usr/bin/env bash
 # Per-user install. No root. Idempotent.
 #   - copies the program to $DEST (default ~/.local/bin)
-#   - on GNOME binds $SHORTCUT (default Ctrl+Shift+Alt+T) to open it in a fitted terminal
+#   - on GNOME binds $SHORTCUT (default Ctrl+Shift+Alt+T) to a window fitted at launch
 #   - runs doctor.sh so you see what this machine will show
 # Usage: bash install.sh      [DEST=/path] [SHORTCUT='<Super>t']
 set -euo pipefail
 SRC=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 DEST=${DEST:-$HOME/.local/bin}
 SHORTCUT=${SHORTCUT:-<Ctrl><Shift><Alt>t}
-GEOMETRY=113x23
 
 bash "$SRC/doctor.sh" >/dev/null || { bash "$SRC/doctor.sh"; echo "fix the [ ] runtime items above first"; exit 1; }
 
@@ -19,9 +18,10 @@ done
 echo "installed to $DEST"
 case ":$PATH:" in *":$DEST:"*) ;; *) echo "note: $DEST is not on PATH - run $DEST/temp_monitor.sh";; esac
 
-CMD="gnome-terminal --geometry=$GEOMETRY -- bash -c '$DEST/temp_monitor.sh 1; exec bash'"
-if command -v gsettings >/dev/null && command -v gnome-terminal >/dev/null \
-   && [[ ${XDG_CURRENT_DESKTOP:-} == *GNOME* ]]; then
+# The launcher sizes the window at launch time from this machine's sensors and
+# screen (see temp_monitor.sh --window), so no geometry is baked in here.
+CMD=$(printf '%q --window 1' "$DEST/temp_monitor.sh")
+if command -v gsettings >/dev/null && [[ ${XDG_CURRENT_DESKTOP:-} == *GNOME* ]]; then
   BASE=org.gnome.settings-daemon.plugins.media-keys
   PFX=/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings
   list=$(gsettings get $BASE custom-keybindings)

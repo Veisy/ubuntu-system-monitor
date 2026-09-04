@@ -15,6 +15,7 @@ re-laid out for the current terminal size.
 
 Usage:
     temp_monitor.py [interval_seconds]     (default 1.0, minimum 0.1)
+    temp_monitor.py --geometry [interval]  print COLSxROWS this machine needs
 
 Keys:
     q / Esc / Ctrl+C    quit and print a summary
@@ -44,11 +45,18 @@ COOL_MAX, OK_MAX, WARM_MAX = 50, 70, 90
 STALE_AFTER = 3              # consecutive failed reads before [stale] shows
 
 MIN_ROWS = 8                 # below this a "too small" notice is drawn (width: min_cols)
+HEADER_ROWS = 6              # box, column headers and rule: the first row a component may use
 PAD, GAP = 2, 3              # GAP leaves room for ' │ ' between columns
 LABEL_W, MIN_LABEL_W = 36, 8
-TEMP_W, LOAD_W, AVG_W, MAX_W, STATUS_W = 5, 5, 4, 4, 6
-GAUGE_MIN_W = 8              # Pwr/Load/VRAM share one width: this, or longest text + 2
-VRAM_W = 9                   # widest VRAM text fmt_vram may produce
+TEMP_W, AVG_W, MAX_W, STATUS_W = 5, 4, 4, 6
+GAUGE_PAD = 2                # gauge margin when there is room: one column either side
+# Every gauge reserves what its formatter can produce at most, never what the
+# current reading happens to be, so a value gaining a digit cannot re-widen the
+# table.  fmt_pwr / fmt_load / fmt_vram each guarantee their own width.
+PWR_W, LOAD_W, VRAM_W = 6, 4, 9
+GAUGE_CAP = {"pwr": PWR_W, "load": LOAD_W, "vram": VRAM_W}
+# Counter allowance for the meta line's width: five-digit sample, 99-hour uptime.
+META_SAMPLE, META_ELAPSED = 99999, 99 * 3600
 
 CPU_HWMON_NAMES = ("k10temp", "zenpower", "coretemp", "x86_pkg_temp", "cpu_thermal")
 NVIDIA_QUERY = ["nvidia-smi", "--format=csv,noheader",
@@ -466,17 +474,58 @@ def fmt_dur(s):
     return f"{h}h {m:02d}m {sec:02d}s" if h else f"{m}m {sec:02d}s"
 
 
+def finite(v):
+    """True when v is a real, finite number.  A sensor that hands back inf, nan
+    or an absurd integer must not reach a format string: it would raise inside
+    a draw and take the frame down."""
+    try:
+        return math.isfinite(float(v))
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
+def frac_of(value, full):
+    """value's share of full scale in 0..1, or None when there is no usable
+    scale - a gauge with no scale is drawn as plain text."""
+    if not full or not finite(value) or not finite(full):
+        return None
+    return max(0.0, min(1.0, float(value) / float(full)))
+
+
+def fmt_pwr(watts):
+    """Watts in at most PWR_W columns: '19.6W', '999.9W', '1234W', '123kW'.
+    Bounded, because the gauge reserves PWR_W for it."""
+    if not finite(watts):
+        return None
+    watts = float(watts)
+    for cell in (f"{watts:.1f}W", f"{watts:.0f}W",
+                 f"{watts / 1000:.1f}kW", f"{watts / 1000:.0f}kW"):
+        if len(cell) <= PWR_W:
+            return cell
+    return None                   # off any real scale: no reading, not digits
+
+
+def fmt_load(util):
+    """Utilisation as '%0'..'%100' - clamped, so LOAD_W is a real ceiling."""
+    if not finite(util):
+        return None
+    return f"%{max(0, min(100, int(round(float(util)))))}"
+
+
 def fmt_vram(vram):
-    """(used_mib, total_mib) -> '20.6/24GB'; precision drops so the text never
-    exceeds VRAM_W ('118/141GB')."""
-    if not vram:
+    """(used_mib, total_mib) -> '20.6/24GB'; precision, then the unit, then a
+    bare percentage drop so the text never exceeds VRAM_W - a 2 TB card would
+    otherwise overflow the width the gauge reserved."""
+    if not vram or not all(finite(v) for v in vram):
         return "--"
-    used, total = (v / 1024.0 for v in vram)
-    for fmt in ("{u:.1f}/{t:.0f}GB", "{u:.0f}/{t:.0f}GB", "{u:.0f}/{t:.0f}G"):
-        cell = fmt.format(u=used, t=total)
+    used, total = (float(v) / 1024.0 for v in vram)
+    pct = 100 * used / total if total else 0
+    for cell in (f"{used:.1f}/{total:.0f}GB", f"{used:.0f}/{total:.0f}GB",
+                 f"{used:.0f}/{total:.0f}G", f"{used / 1024:.1f}/{total / 1024:.1f}T",
+                 f"%{pct:.0f}"):
         if len(cell) <= VRAM_W:
-            break
-    return cell
+            return cell
+    return "--"                   # nothing bounded fits: show no reading
 
 
 def status_for(temp):
@@ -572,62 +621,159 @@ def trunc_tail(s, n):
     return "…" + s[-(n - 1):]
 
 
-Layout = collections.namedtuple("Layout", "lw bw off right gw")
+Layout = collections.namedtuple("Layout", "lw off right gw")
 
 
 def gauge_cells(c):
     """(col, frac, text) for a row's gauges; text None = no reading, frac
     None = no full scale (text only)."""
     return [
-        ("pwr", c.pwr / c.pwr_max if c.pwr is not None and c.pwr_max else None,
-         f"{c.pwr:.1f}W" if c.pwr is not None else None),
-        ("load", None if c.util is None else c.util / 100,
-         f"%{c.util}" if c.util is not None else None),
-        ("vram", c.vram[0] / c.vram[1] if c.vram else None,
+        ("pwr", frac_of(c.pwr, c.pwr_max), fmt_pwr(c.pwr)),
+        ("load", frac_of(c.util, 100), fmt_load(c.util)),
+        ("vram", frac_of(c.vram[0], c.vram[1]) if c.vram else None,
          fmt_vram(c.vram) if c.vram else None),
     ]
 
 
-def gauge_width(state):
-    """One width for every gauge: GAUGE_MIN_W, or the longest text shown on
-    any gauge plus a one-column margin either side."""
-    texts = [t for c in state.comps.values() for _, _, t in gauge_cells(c) if t]
-    return max([GAUGE_MIN_W] + [len(t) + 2 for t in texts])
+def gauge_text_w(vram):
+    """Narrowest gauge that can still show any text its column may produce:
+    the widest reserved capacity among the visible gauges.  Derived from the
+    formatters, never from a sample, so columns hold still while values move.
+    vram=False leaves out the VRAM column, whose texts are the widest."""
+    cols = ("pwr", "load", "vram") if vram else ("pwr", "load")
+    return max(GAUGE_CAP[c] for c in cols)
 
 
-def _layout(lw, bw, vram, avg, mx, gw):
+def has_vram(state):
+    """Whether a VRAM column is offered at all: true when this machine has a
+    GPU, not when a sample happened to read VRAM - a capability, so a driver
+    hiccup cannot make the column appear and vanish."""
+    return any(cat(k) == "gpu" for k in state.order)
+
+
+def _layout(lw, vram, avg, mx, gw):
     x, off = PAD, {}
     for name, w in (("label", lw), ("temp", TEMP_W), ("pwr", gw),
-                    ("load", bw or LOAD_W), ("vram", gw if vram else 0),
+                    ("load", gw), ("vram", gw if vram else 0),
                     ("avg", AVG_W if avg else 0), ("max", MAX_W if mx else 0),
                     ("status", STATUS_W)):
         if w:
             off[name] = x
             x += w + GAP
-    return Layout(lw, bw, off, x - GAP, gw)
+    return Layout(lw, off, x - GAP, gw)
 
 
-def min_cols(gw):
-    """Narrowest terminal that fits the narrowest layout."""
-    return _layout(MIN_LABEL_W, 0, False, False, False, gw).right + PAD
+def min_cols(state=None):
+    """Narrowest terminal that fits the narrowest layout: shortest label, no
+    VRAM/avg/max, every gauge at the width its formatters reserve.  Constant,
+    so the "too small" threshold cannot move while values move; `state` is
+    accepted for symmetry with compute_layout."""
+    return _layout(MIN_LABEL_W, False, False, False,
+                   gauge_text_w(False)).right + PAD
 
 
-def compute_layout(iw, gw=GAUGE_MIN_W):
+def compute_layout(iw, state):
     """Column geometry for inner width iw.  Order: label, temp, pwr, load,
-    [vram], [avg], [max], status; optional columns are dropped as the
-    terminal narrows and are simply absent from Layout.off.  Pwr and VRAM
-    are gw-wide gauges; Load is one too when room allows, else LOAD_W of
-    plain text."""
-    def spare(lw, vram, avg, mx):
-        return iw - PAD - _layout(lw, 0, vram, avg, mx, gw).right
+    [vram], [avg], [max], status.  Every gauge is a bar and all of them share
+    one width, which is the background of the value it shows: gauges never
+    narrow past the width their formatters reserve, and any spare width goes to
+    their side margins (up to GAUGE_PAD) before it is left unused.  When even
+    bare-text gauges do not fit, avg/max are dropped, then VRAM, and last the
+    label shrinks towards MIN_LABEL_W."""
+    def spare(lw, vram, avg, mx, gw):
+        return iw - PAD - _layout(lw, vram, avg, mx, gw).right
 
-    for avg, mx in ((True, True), (False, False)):
-        if gw - LOAD_W <= spare(LABEL_W, True, avg, mx):
-            return _layout(LABEL_W, gw, True, avg, mx, gw)
-    for vram in (True, False):
-        lw = MIN_LABEL_W + spare(MIN_LABEL_W, vram, False, False)
-        if lw >= MIN_LABEL_W or not vram:
-            return _layout(min(LABEL_W, max(MIN_LABEL_W, lw)), 0, vram, False, False, gw)
+    vrams = (True, False) if has_vram(state) else (False,)
+    for vram in vrams:
+        tw = gauge_text_w(vram)
+        for avg in (True, False):
+            room = spare(LABEL_W, vram, avg, avg, tw)
+            if room >= 0:
+                gauges = 3 if vram else 2
+                return _layout(LABEL_W, vram, avg, avg,
+                               tw + min(GAUGE_PAD, room // gauges))
+    tw = gauge_text_w(False)
+    lw = MIN_LABEL_W + spare(MIN_LABEL_W, False, False, False, tw)
+    return _layout(min(LABEL_W, max(MIN_LABEL_W, lw)), False, False, False, tw)
+
+
+TITLE = "SYSTEM TEMPERATURE MONITOR"
+LEGEND_LABEL = "Legend:"
+LEGEND_HINT = "[q] quit + summary    [r] reset stats"
+LEGEND = (("Cool <50C", "cool"), ("OK 50–69C", "ok"),
+          ("Warm 70–89C", "warm"), ("HOT ≥90C", "hot"))
+
+
+def legend_layout():
+    """([(x, text, colour_key)], hint_x): where the legend row's cells go.  The
+    renderer and the width calculation both read it, so neither can drift."""
+    x, cells = PAD + len(LEGEND_LABEL) + 2, []
+    for text, key in LEGEND:
+        cells.append((x, text, key))
+        x += len(text) + 2
+    return cells, x + 2
+
+
+def legend_cols():
+    """Columns the legend row needs.  It carries fixed strings, so unlike the
+    table it cannot shrink - which makes it a floor for the window width."""
+    _, hint_x = legend_layout()
+    return hint_x + len(LEGEND_HINT)
+
+
+def meta_text(stamp, sample, elapsed, interval):
+    return (f"{stamp}  ·  sample {sample}  ·  running {fmt_dur(elapsed)}"
+            f"  ·  refresh {interval:g}s")
+
+
+def meta_cols(interval):
+    """Columns the header's meta line needs once the counters have grown."""
+    return PAD + len(meta_text(time.strftime("%Y-%m-%d %H:%M:%S"), META_SAMPLE,
+                               META_ELAPSED, interval)) + PAD
+
+
+def group_rules(keys):
+    """Rules drawn between hardware groups: one per change of group."""
+    cats = [cat(k) for k in keys]
+    return sum(1 for a, b in zip(cats, cats[1:]) if a != b)
+
+
+def pci_gpu_count():
+    """NVIDIA display devices the kernel sees in sysfs.  Read instead of
+    trusting one nvidia-smi round: the driver can be busy or briefly
+    unavailable, and a window sized during that outage would be short by a row
+    per GPU once the rows come back."""
+    n = 0
+    for dev in glob.glob("/sys/bus/pci/devices/*"):
+        if _read_str(f"{dev}/vendor") == "0x10de" and \
+                (_read_str(f"{dev}/class") or "")[:6] in ("0x0300", "0x0302"):
+            n += 1
+    return n
+
+
+def geometry_keys(state):
+    """The rows a window must plan for: what this sample found, plus a row for
+    every GPU sysfs knows about that the sample missed, so the height is a
+    property of the hardware rather than of one round's luck."""
+    keys = list(state.order)
+    missing = pci_gpu_count() - sum(1 for k in keys if cat(k) == "gpu")
+    if missing > 0:
+        gpus = [k for k in keys if cat(k) == "gpu"]
+        at = keys.index(gpus[-1]) + 1 if gpus else len(keys)
+        keys[at:at] = [f"gpu-absent{i}" for i in range(missing)]
+    return keys
+
+
+def ideal_geometry(state, interval):
+    """(cols, rows) for a window that shows everything this machine reports.
+    Width is the widest line that cannot shrink - the legend, the meta line, or
+    the narrowest table - so the table adapts inside it instead of the window
+    growing to the table's full width.  Height covers the header, every sensor
+    row, its group rules, the closing rule, the legend, and the bottom row
+    put() keeps free."""
+    keys = geometry_keys(state)
+    cols = max(legend_cols(), meta_cols(interval), min_cols(state), len(TITLE) + 2 * PAD)
+    return cols, max(HEADER_ROWS + len(keys) + group_rules(keys) + 3, MIN_ROWS)
 
 
 def put(stdscr, y, x, text, attr=0):
@@ -660,13 +806,12 @@ def render_row(stdscr, y, c, L):
     for col, frac, text in gauge_cells(c):
         if col not in o:
             continue
-        w = (L.bw or LOAD_W) if col == "load" else L.gw
         if text is None:
-            put(stdscr, y, o[col], "--".center(w), curses.A_DIM)
-        elif frac is None or (col == "load" and not L.bw):
-            put(stdscr, y, o[col], text.center(w), curses.A_DIM)  # no full scale: text only
+            put(stdscr, y, o[col], "--".center(L.gw), curses.A_DIM)
+        elif frac is None:
+            put(stdscr, y, o[col], text.center(L.gw), curses.A_DIM)  # no scale: text only
         else:
-            gauge(stdscr, y, o[col], w, frac, text, c.temp)
+            gauge(stdscr, y, o[col], L.gw, frac, text, c.temp)
     for col, v in (("avg", c.avg), ("max", c.max)):
         if col in o:
             put(stdscr, y, o[col], f"{v:3d}" if v is not None else "  --", curses.A_DIM)
@@ -676,11 +821,10 @@ def render_row(stdscr, y, c, L):
 def draw(stdscr, state, interval):
     stdscr.erase()
     H, W = stdscr.getmaxyx()
-    gw = gauge_width(state)
-    if W < min_cols(gw) or H < MIN_ROWS:
+    if W < min_cols(state) or H < MIN_ROWS:
         y = max(1, H // 2 - 1)
         put(stdscr, y, 0, f"Terminal too small: {W}x{H}  "
-            f"(need at least {min_cols(gw)}x{MIN_ROWS})", curses.A_BOLD)
+            f"(need at least {min_cols(state)}x{MIN_ROWS})", curses.A_BOLD)
         put(stdscr, y + 1, 0, "Resize the terminal window to continue.")
         return
 
@@ -689,18 +833,17 @@ def draw(stdscr, state, interval):
     for y in (1, 2):
         put(stdscr, y, 0, "│")
         put(stdscr, y, W - 1, "│")
-    put(stdscr, 1, PAD, "SYSTEM TEMPERATURE MONITOR", curses.A_BOLD | _pair("title", 0))
-    put(stdscr, 2, PAD, f"{time.strftime('%Y-%m-%d %H:%M:%S')}  ·  sample {state.sample}"
-        f"  ·  running {fmt_dur(time.time() - state.start)}  ·  refresh {interval:g}s",
-        curses.A_DIM)
+    put(stdscr, 1, PAD, TITLE, curses.A_BOLD | _pair("title", 0))
+    put(stdscr, 2, PAD, meta_text(time.strftime("%Y-%m-%d %H:%M:%S"), state.sample,
+                                  time.time() - state.start, interval), curses.A_DIM)
     put(stdscr, 3, 0, "└" + "─" * (W - 2) + "┘")
 
     # column headers, then a rule
-    L = compute_layout(W, gw)
+    L = compute_layout(W, state)
     o, right = L.off, L.right
     for col, hdr, w in (("label", "Component", 0), ("temp", "Temp", 0),
-                        ("pwr", "Pwr", gw), ("load", "Load", L.bw or LOAD_W),
-                        ("vram", "VRAM", gw), ("avg", "avg", -AVG_W),
+                        ("pwr", "Pwr", L.gw), ("load", "Load", L.gw),
+                        ("vram", "VRAM", L.gw), ("avg", "avg", -AVG_W),
                         ("max", "max", -MAX_W), ("status", "Status", 0)):
         if col in o:
             put(stdscr, 4, o[col], hdr.center(w) if w > 0 else hdr.rjust(-w), curses.A_DIM)
@@ -710,7 +853,7 @@ def draw(stdscr, state, interval):
     def rule(y):
         put(stdscr, y, PAD, "─" * (right - PAD), curses.A_DIM)
 
-    y, prev = 6, None
+    y, prev = HEADER_ROWS, None
     for shown, key in enumerate(state.order):
         c = state.comps[key]
         if prev is not None and cat(key) != prev:  # rule between hardware groups
@@ -726,14 +869,11 @@ def draw(stdscr, state, interval):
     else:
         if y + 1 < H - 1:  # rule + legend only when both fit
             rule(y)
-            x = PAD
-            put(stdscr, y + 1, x, "Legend:", curses.A_DIM)
-            x += 9
-            for text, k in (("Cool <50C", "cool"), ("OK 50–69C", "ok"),
-                            ("Warm 70–89C", "warm"), ("HOT ≥90C", "hot")):
-                put(stdscr, y + 1, x, text, _pair(f"{k}_bg", 0))
-                x += len(text) + 2
-            put(stdscr, y + 1, x + 2, "[q] quit + summary    [r] reset stats", curses.A_DIM)
+            cells, hint_x = legend_layout()
+            put(stdscr, y + 1, PAD, LEGEND_LABEL, curses.A_DIM)
+            for x, text, key in cells:
+                put(stdscr, y + 1, x, text, _pair(f"{key}_bg", 0))
+            put(stdscr, y + 1, hint_x, LEGEND_HINT, curses.A_DIM)
         return
     put(stdscr, min(y, H - 2), PAD,
         f"... {len(state.order) - shown} more row(s) — enlarge the terminal", curses.A_DIM)
@@ -830,12 +970,27 @@ def print_summary(state, interval):
     print()
 
 
+def report_geometry(interval):
+    """Print the terminal size this machine's sensors need, for a launcher to
+    open a fitted window.  One sensor round is enough: GPUs missing from it are
+    still counted from sysfs (see geometry_keys)."""
+    state = State()
+    collect_round(state, SensorReader(), CpuPower())
+    cols, rows = ideal_geometry(state, interval)
+    print(f"{cols}x{rows}")
+    return 0
+
+
 def main():
     interval = 1.0
+    geometry = False
     for a in sys.argv[1:]:
         if a in ("-h", "--help"):
             print(__doc__.strip())
             return 0
+        if a == "--geometry":
+            geometry = True
+            continue
         try:
             interval = float(a)
             if not math.isfinite(interval):
@@ -844,6 +999,8 @@ def main():
             print(f"temp_monitor: invalid interval: {a!r}", file=sys.stderr)
             return 2
         interval = max(0.1, interval)
+    if geometry:                      # no curses, no TTY: a launcher asks this
+        return report_geometry(interval)
     if not (sys.stdout.isatty() and sys.stdin.isatty()):
         print("temp_monitor: requires an interactive terminal (TTY)", file=sys.stderr)
         return 2
