@@ -3,13 +3,19 @@
 # Implementation lives in temp_monitor.py next to this script.
 # Usage: temp_monitor.sh [interval_seconds]    run here (keys: q quit, r reset stats)
 #        temp_monitor.sh --window [interval]   open a terminal window fitted to this machine
-# How the window is sized, and the per-emulator flags: docs/REFERENCE.md.
+#        temp_monitor.sh --window --dry-run     print the emulator and size it would use
+# How the window is sized, the per-emulator flags, and why ptyxis needs a
+# dconf overlay instead of a flag: docs/REFERENCE.md.
 set -uo pipefail
 DIR=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
 PY=$DIR/temp_monitor.py
 [[ ${1:-} == --window ]] || exec python3 "$PY" "$@"
 shift
-INTERVAL=${1:-1}
+dry=0 INTERVAL=1
+for a in "$@"; do
+  [[ $a == --dry-run ]] && { dry=1; continue; }
+  INTERVAL=$a
+done
 # Same spellings python accepts ('.5', '1e0'), refused here rather than in a
 # window that opens only to print an error.
 [[ $INTERVAL =~ ^([0-9]+|[0-9]*\.[0-9]+)([eE][-+]?[0-9]+)?$ ]] || {
@@ -69,18 +75,69 @@ ceiling() {                       # "<cols> <rows>" the screen can show, or noth
   }'
 }
 
-fitted=0
+# The ideal is always what gets sent: a window manager clamps an oversized
+# window to the work area anyway, and the renderer adapts to what it gets.  A
+# screen ceiling, when one can be measured, only shrinks the request further.
+ceiling_note="no screen probe"
 if [[ -n $cols && -n $rows ]]; then
   read -r maxc maxr < <(ceiling)
   if [[ ${maxc:-} =~ ^[0-9]+$ && ${maxr:-} =~ ^[0-9]+$ ]] && (( maxc > 0 && maxr > 0 )); then
     (( cols > maxc )) && cols=$maxc              # never larger than the screen
     (( rows > maxr )) && rows=$maxr
-    fitted=1
+    ceiling_note="screen fits ${maxc}x${maxr}"
   fi
+else
+  echo "temp_monitor: --geometry failed; the emulator picks its own size" >&2
 fi
 
 # --- open it ---------------------------------------------------------------------
-inner=$(printf '%q %q; exec %q' "$DIR/temp_monitor.sh" "$INTERVAL" "${SHELL:-/bin/bash}")
+# TEMP_MONITOR_FIT lets the monitor ask the emulator for this size once it is
+# running (XTWINOPS), for emulators whose launch flags are ignored or missing.
+fit=${cols:+${cols}x${rows}}
+inner=$(printf 'TEMP_MONITOR_FIT=%q %q %q; exec %q' "$fit" "$DIR/temp_monitor.sh" \
+        "$INTERVAL" "${SHELL:-/bin/bash}")
+
+# Ptyxis has no character-geometry flag and ignores XTWINOPS resizing. Overlay
+# only its window-size settings for this process; never write the user's dconf.
+ptyxis_build() {                  # compile the overlay for ${cols}x${rows}
+  local db=$1 prof=$2 kf
+  kf=$(mktemp -d "$(dirname "$db")/kf.XXXXXX") || return 1
+  printf '[org/gnome/Ptyxis]\nrestore-window-size=false\nrestore-session=false\ndefault-columns=uint32 %s\ndefault-rows=uint32 %s\n' \
+         "$cols" "$rows" >"$kf/fit"
+  if dconf compile "$kf.db" "$kf" 2>/dev/null && [[ -s $kf.db ]] &&
+     printf 'file-db:%s\nuser-db:user\n' "$db" >"$kf.profile" &&
+     mv -f "$kf.db" "$db" && mv -f "$kf.profile" "$prof"; then
+    rm -rf "$kf"; return 0
+  fi
+  rm -rf "$kf" "$kf.db" "$kf.profile"; return 1
+}
+
+ptyxis_verifies() {               # does ptyxis really read ${cols}x${rows} here?
+  local prof=$1 c r window session
+  c=$(DCONF_PROFILE=$prof gsettings get org.gnome.Ptyxis default-columns 2>/dev/null)
+  r=$(DCONF_PROFILE=$prof gsettings get org.gnome.Ptyxis default-rows 2>/dev/null)
+  window=$(DCONF_PROFILE=$prof gsettings get org.gnome.Ptyxis restore-window-size 2>/dev/null)
+  session=$(DCONF_PROFILE=$prof gsettings get org.gnome.Ptyxis restore-session 2>/dev/null)
+  [[ ${c##* } == "$cols" && ${r##* } == "$rows" && $window == false && $session == false ]]
+}
+
+ptyxis_profile() {                # print a verified DCONF_PROFILE, or fail
+  local dir=${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/temp_monitor.$UID
+  local db=$dir/$1.db prof=$dir/$1.profile attempt
+  command -v dconf >/dev/null && command -v gsettings >/dev/null || return 1
+  if [[ -e $dir || -L $dir ]]; then
+    [[ -d $dir && ! -L $dir && -O $dir ]] || return 1
+  else
+    (umask 077; mkdir "$dir") || return 1
+  fi
+  chmod 700 "$dir" || return 1
+  for attempt in 1 2; do          # a cached db that stops verifying is rebuilt once
+    [[ -s $db && -s $prof ]] || ptyxis_build "$db" "$prof" || return 1
+    ptyxis_verifies "$prof" && { echo "$prof"; return 0; }
+    rm -f "$db" "$prof"
+  done
+  return 1
+}
 
 desktop_term() {
   case ${XDG_CURRENT_DESKTOP:-}${DESKTOP_SESSION:-} in
@@ -105,36 +162,47 @@ if [[ -z $term ]]; then
   exit 1
 fi
 
-# A fitted window uses the emulator's own CHARACTER geometry; without a ceiling
-# we open maximized instead, which is never larger than the screen either, and
-# the renderer adapts to whatever size it gets.
-case $(basename "$(readlink -f "$term")") in
+# Each emulator gets the size in its own CHARACTER-geometry spelling; with no
+# size at all it opens however it likes and the renderer adapts.
+kind=$(basename "$(readlink -f "$term")")
+cmd=("$term")
+case $kind in
   *.wrapper)                       # x-terminal-emulator -> gnome-terminal.wrapper et al:
     # a Perl option translator that knows xterm spellings and silently drops
     # everything else, so the native --geometry=CxR form would launch nothing.
-    (( fitted )) && exec "$term" -geometry "${cols}x${rows}" -e bash -c "$inner"
-    exec "$term" -e bash -c "$inner" ;;          # no maximize spelling exists here
+    [[ -n $fit ]] && cmd+=(-geometry "$fit"); cmd+=(-e) ;;
   gnome-terminal*)
-    (( fitted )) && exec "$term" --geometry="${cols}x${rows}" -- bash -c "$inner"
-    exec "$term" --maximize -- bash -c "$inner" ;;
+    [[ -n $fit ]] && cmd+=(--geometry="$fit"); cmd+=(--) ;;
   xfce4-terminal*|mate-terminal*)
-    (( fitted )) && exec "$term" --geometry="${cols}x${rows}" -x bash -c "$inner"
-    exec "$term" --maximize -x bash -c "$inner" ;;
+    [[ -n $fit ]] && cmd+=(--geometry="$fit"); cmd+=(-x) ;;
   konsole*)
-    (( fitted )) && exec "$term" -p "TerminalColumns=$cols" -p "TerminalRows=$rows" \
-                                 -e bash -c "$inner"
-    exec "$term" --fullscreen -e bash -c "$inner" ;;
+    [[ -n $fit ]] && cmd+=(-p "TerminalColumns=$cols" -p "TerminalRows=$rows"); cmd+=(-e) ;;
   kitty*)
-    (( fitted )) && exec "$term" -o "initial_window_width=${cols}c" \
-                                 -o "initial_window_height=${rows}c" bash -c "$inner"
-    exec "$term" --start-as=maximized bash -c "$inner" ;;
+    [[ -n $fit ]] && cmd+=(-o "initial_window_width=${cols}c" -o "initial_window_height=${rows}c") ;;
   alacritty*)
-    (( fitted )) && exec "$term" -o "window.dimensions.columns=$cols" \
-                                 -o "window.dimensions.lines=$rows" -e bash -c "$inner"
-    exec "$term" -o 'window.startup_mode="Maximized"' -e bash -c "$inner" ;;
+    [[ -n $fit ]] && cmd+=(-o "window.dimensions.columns=$cols" -o "window.dimensions.lines=$rows")
+    cmd+=(-e) ;;
   xterm*)
-    (( fitted )) && exec "$term" -geometry "${cols}x${rows}" -e bash -c "$inner"
-    exec "$term" -maximized -e bash -c "$inner" ;;
+    [[ -n $fit ]] && cmd+=(-geometry "$fit"); cmd+=(-e) ;;
+  ptyxis*)
+    # -s is what makes the profile bite: without it ptyxis hands the command to
+    # the instance already running, a process that never sees our environment.
+    if [[ -n $fit ]] && prof=$(ptyxis_profile "fit-$fit"); then
+      cmd=(env "DCONF_PROFILE=$prof" "$term" -s --)
+    else
+      [[ -n $fit ]] && echo "temp_monitor: could not size ptyxis through dconf;" \
+        "the window opens at whatever size it remembers" >&2
+      cmd+=(--)                    # -e is undocumented here; -- is not
+    fi ;;
   *)
-    exec "$term" -e bash -c "$inner" ;;          # unknown flags: let it size itself
+    cmd+=(-e) ;;                   # unknown flags: size only via TEMP_MONITOR_FIT
 esac
+cmd+=(bash -c "$inner")
+
+if (( dry )); then
+  echo "emulator: $term ($kind)"
+  echo "size:     ${fit:-none} (${ceiling_note})"
+  printf 'command: '; printf '%q ' "${cmd[@]}"; echo
+  exit 0
+fi
+exec "${cmd[@]}"

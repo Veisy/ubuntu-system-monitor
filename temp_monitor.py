@@ -882,6 +882,19 @@ def draw(stdscr, state, interval):
         f"... {len(state.order) - shown} more row(s) — enlarge the terminal", curses.A_DIM)
 
 
+def request_fit():
+    """Request the launcher-computed size when the terminal opened differently."""
+    m = re.fullmatch(r"(\d+)x(\d+)", os.environ.get("TEMP_MONITOR_FIT", ""))
+    if not m:
+        return
+    cols, rows = int(m.group(1)), int(m.group(2))
+    s = shutil.get_terminal_size()
+    _dlog(f"fit request {cols}x{rows}, terminal is {s.columns}x{s.lines}")
+    if (s.columns, s.lines) != (cols, rows):
+        sys.__stdout__.write(f"\033[8;{rows};{cols}t")
+        sys.__stdout__.flush()
+
+
 class TermSync:
     """Call resizeterm() only when the terminal size actually changed: every
     call arms a KEY_RESIZE, so doing it each round would starve real keys;
@@ -916,6 +929,7 @@ def run(stdscr, state, interval):
     # No SIGWINCH handler of our own: ncurses flags the resize and wakes
     # getch() with KEY_RESIZE; TermSync then resizes stdscr next round.
     reader, cpu_power, term = SensorReader(), CpuPower(), TermSync()
+    request_fit()
     while True:
         term.sync()
         t0 = time.monotonic()

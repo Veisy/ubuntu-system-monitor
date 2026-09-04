@@ -23,6 +23,9 @@ if [[ -t 1 ]]; then
 below that rows drop out - 'temp_monitor.sh --window' opens a fitted one"
   fi
 fi
+if plan=$(bash "$SRC/temp_monitor.sh" --window --dry-run 2>&1); then
+  ok "window: $(sed -n 's/^emulator: //p' <<<"$plan"), opens at $(sed -n 's/^size: *//p' <<<"$plan")"
+else miss "window: ${plan##*: }"; fi
 
 echo "data sources:"
 names=$(cat /sys/class/hwmon/hwmon*/name 2>/dev/null | sort -u | tr '\n' ' ')

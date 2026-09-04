@@ -58,7 +58,8 @@ launches the terminal it finds (`$TERMINAL`, then the desktop's own, then `x-ter
 then gnome-terminal, konsole, xfce4-terminal, mate-terminal, kitty, alacritty, xterm) with that
 emulator's character geometry.
 No size is stored anywhere — add a GPU or a disk and the next window is taller. Sizing rules:
-`docs/REFERENCE.md`.
+`docs/REFERENCE.md`. If the window opens the wrong size, `temp_monitor.sh --window --dry-run`
+shows which emulator was picked and what it was asked for.
 
 Other desktops: bind the same command, whatever the emulator.
 

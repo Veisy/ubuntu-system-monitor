@@ -45,15 +45,29 @@ start hidden. Rows cover the
 header, every sensor row, the rules between hardware groups, the closing rule, the legend, and
 the bottom line curses keeps free.
 
-`temp_monitor.sh --window [interval]` opens it. The ideal size is capped by a deliberately
-conservative screen ceiling — pixels of one monitor (`xrandr` primary, else its active mode;
-never `xdpyinfo`'s multi-head union), cell size from the desktop
-monospace font's point size, the desktop text-scaling factor and DPI (0.60 em wide, 1.25 em
-tall, rounded up, 95 % of the screen)
-— so the window is never larger than the display. `TEMP_MONITOR_FONT_PT` overrides the font
-probe. With no screen probe (no X tools, an unknown font source) the window opens maximized
-instead, and the renderer adapts; the unclamped ideal is never sent. XTWINOPS `CSI 8 t` resizing
-is not used: VTE ignores the requested size.
+`temp_monitor.sh --window [interval]` opens it, always passing that size in the emulator's own
+character-geometry spelling (`--geometry=CxR`, konsole profile properties, kitty / alacritty
+options). When the screen can be measured — pixels of one monitor (`xrandr` primary, else its
+active mode; never `xdpyinfo`'s multi-head union), cell size from the desktop monospace font's
+point size, the desktop text-scaling factor and DPI (0.60 em wide, 1.25 em tall, rounded up, 95 %
+of the screen) — the request is capped by it; without a probe the uncapped size is sent, since a
+window manager clamps an oversized window to the work area anyway. `TEMP_MONITOR_FONT_PT`
+overrides the font probe. The window is never opened maximized: a maximized gnome-terminal
+starts at 80×24 and then jumps to the whole screen.
+
+The launcher also exports `TEMP_MONITOR_FIT=CxR` to the monitor, which — only in that window,
+never in a terminal opened by hand — asks the emulator for that size once at start (XTWINOPS
+`CSI 8 t`) when the window came up a different size, covering emulators that ignore or lack a
+launch flag. gnome-terminal (VTE), xterm and konsole all honour it — an 80×24 window is 95×23
+one frame later.
+
+Ptyxis supports neither route, so the launcher supplies its computed size through a verified,
+read-only dconf overlay in the runtime directory. The overlay applies only to the new Ptyxis
+process and leaves the user's settings unchanged. If dconf, the expected schema, or verification
+is unavailable, the launcher warns and lets Ptyxis choose its own size.
+
+`temp_monitor.sh --window --dry-run` prints the emulator, the size and the exact command without
+opening anything; `doctor.sh` shows the same line.
 
 ## Exit summary
 
