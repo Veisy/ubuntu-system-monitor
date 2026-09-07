@@ -536,7 +536,7 @@ def status_for(temp):
 
 
 STATUS_KEY = {"Cool": "cool", "OK": "ok", "Warm": "warm", "HOT!": "hot"}
-STATUS_FG = {"cool": curses.COLOR_GREEN, "ok": curses.COLOR_CYAN,
+STATUS_FG = {"cool": curses.COLOR_CYAN, "ok": curses.COLOR_GREEN,
              "warm": curses.COLOR_YELLOW, "hot": curses.COLOR_RED}
 COLORS = {}
 
